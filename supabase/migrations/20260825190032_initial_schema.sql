@@ -1,6 +1,8 @@
 -- Rivera Cotizador: tenant isolation, immutable issued quotes and privacy workflows.
 
 create extension if not exists pgcrypto;
+create schema if not exists private;
+revoke all on schema private from public, anon, authenticated;
 
 create type public.organization_role as enum ('owner', 'admin', 'seller', 'viewer');
 create type public.quote_status as enum ('draft', 'issued', 'accepted', 'expired', 'void');
@@ -138,16 +140,22 @@ create table public.privacy_requests (
 );
 
 create index clients_organization_active_idx on public.clients (organization_id, name) where deleted_at is null;
+create index clients_created_by_idx on public.clients (created_by);
 create index products_organization_active_idx on public.products (organization_id, code) where deleted_at is null;
+create index products_created_by_idx on public.products (created_by);
 create index quotes_organization_status_idx on public.quotes (organization_id, status, issued_on desc);
+create index quotes_created_by_idx on public.quotes (created_by);
 create index quote_items_quote_idx on public.quote_items (quote_id, position);
 create index quote_items_organization_idx on public.quote_items (organization_id, quote_id);
+create index quote_items_product_idx on public.quote_items (product_id) where product_id is not null;
 create index organization_members_user_idx on public.organization_members (user_id, organization_id);
 create index quotes_client_idx on public.quotes (client_id) where client_id is not null;
 create index audit_events_organization_created_idx on public.audit_events (organization_id, created_at desc);
+create index audit_events_actor_user_idx on public.audit_events (actor_user_id) where actor_user_id is not null;
 create index privacy_requests_organization_status_idx on public.privacy_requests (organization_id, status, received_at desc);
+create index privacy_requests_requester_user_idx on public.privacy_requests (requester_user_id) where requester_user_id is not null;
 
-create or replace function public.is_organization_member(target_organization_id uuid)
+create or replace function private.is_organization_member(target_organization_id uuid)
 returns boolean
 language sql
 stable
@@ -162,7 +170,7 @@ as $$
   );
 $$;
 
-create or replace function public.has_organization_role(
+create or replace function private.has_organization_role(
   target_organization_id uuid,
   allowed_roles public.organization_role[]
 )
@@ -205,7 +213,7 @@ begin
 end;
 $$;
 
-create or replace function public.set_updated_at()
+create or replace function private.set_updated_at()
 returns trigger
 language plpgsql
 set search_path = ''
@@ -216,7 +224,7 @@ begin
 end;
 $$;
 
-create or replace function public.recalculate_quote_totals()
+create or replace function private.recalculate_quote_totals()
 returns trigger
 language plpgsql
 security definer
@@ -243,7 +251,7 @@ begin
 end;
 $$;
 
-create or replace function public.guard_issued_quote_items()
+create or replace function private.guard_issued_quote_items()
 returns trigger
 language plpgsql
 security definer
@@ -271,6 +279,16 @@ begin
       raise exception 'Quote item organization mismatch';
     end if;
 
+    if new.product_id is not null and not exists (
+      select 1
+      from public.products
+      where id = new.product_id
+        and organization_id = new.organization_id
+        and deleted_at is null
+    ) then
+      raise exception 'Quote item product organization mismatch';
+    end if;
+
     expected_net := round(new.quantity * new.unit_price)::bigint;
     expected_tax := round(expected_net * quote_tax_rate / 100)::bigint;
 
@@ -285,7 +303,7 @@ begin
 end;
 $$;
 
-create or replace function public.guard_issued_quote()
+create or replace function private.guard_issued_quote()
 returns trigger
 language plpgsql
 set search_path = ''
@@ -335,15 +353,45 @@ begin
 end;
 $$;
 
-create trigger organizations_updated_at before update on public.organizations for each row execute function public.set_updated_at();
-create trigger clients_updated_at before update on public.clients for each row execute function public.set_updated_at();
-create trigger products_updated_at before update on public.products for each row execute function public.set_updated_at();
-create trigger quotes_guard before update on public.quotes for each row execute function public.guard_issued_quote();
-create trigger quote_items_guard before insert or update or delete on public.quote_items for each row execute function public.guard_issued_quote_items();
-create trigger quote_items_totals after insert or update or delete on public.quote_items for each row execute function public.recalculate_quote_totals();
-create trigger privacy_requests_updated_at before update on public.privacy_requests for each row execute function public.set_updated_at();
+create or replace function private.guard_tenant_relationships()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  if tg_op = 'UPDATE' and new.organization_id is distinct from old.organization_id then
+    raise exception 'Organization cannot be changed';
+  end if;
 
-create or replace function public.capture_audit_event()
+  if tg_table_name = 'quotes' and new.client_id is not null and not exists (
+    select 1
+    from public.clients
+    where id = new.client_id
+      and organization_id = new.organization_id
+      and deleted_at is null
+  ) then
+    raise exception 'Quote client organization mismatch';
+  end if;
+
+  return new;
+end;
+$$;
+
+create trigger organizations_updated_at before update on public.organizations for each row execute function private.set_updated_at();
+create trigger organization_members_tenant_guard before update on public.organization_members for each row execute function private.guard_tenant_relationships();
+create trigger clients_updated_at before update on public.clients for each row execute function private.set_updated_at();
+create trigger clients_tenant_guard before update on public.clients for each row execute function private.guard_tenant_relationships();
+create trigger products_updated_at before update on public.products for each row execute function private.set_updated_at();
+create trigger products_tenant_guard before update on public.products for each row execute function private.guard_tenant_relationships();
+create trigger quotes_tenant_guard before insert or update on public.quotes for each row execute function private.guard_tenant_relationships();
+create trigger quotes_guard before update on public.quotes for each row execute function private.guard_issued_quote();
+create trigger quote_items_guard before insert or update or delete on public.quote_items for each row execute function private.guard_issued_quote_items();
+create trigger quote_items_totals after insert or update or delete on public.quote_items for each row execute function private.recalculate_quote_totals();
+create trigger privacy_requests_updated_at before update on public.privacy_requests for each row execute function private.set_updated_at();
+create trigger privacy_requests_tenant_guard before update on public.privacy_requests for each row execute function private.guard_tenant_relationships();
+
+create or replace function private.capture_audit_event()
 returns trigger
 language plpgsql
 security definer
@@ -387,9 +435,9 @@ begin
 end;
 $$;
 
-create trigger clients_audit after insert or update on public.clients for each row execute function public.capture_audit_event();
-create trigger products_audit after insert or update on public.products for each row execute function public.capture_audit_event();
-create trigger quotes_audit after insert or update on public.quotes for each row execute function public.capture_audit_event();
+create trigger clients_audit after insert or update on public.clients for each row execute function private.capture_audit_event();
+create trigger products_audit after insert or update on public.products for each row execute function private.capture_audit_event();
+create trigger quotes_audit after insert or update on public.quotes for each row execute function private.capture_audit_event();
 
 alter table public.organizations enable row level security;
 alter table public.organization_members enable row level security;
@@ -400,43 +448,44 @@ alter table public.quote_items enable row level security;
 alter table public.audit_events enable row level security;
 alter table public.privacy_requests enable row level security;
 
-create policy organizations_select on public.organizations for select to authenticated using (public.is_organization_member(id));
-create policy organizations_update on public.organizations for update to authenticated using (public.has_organization_role(id, array['owner', 'admin']::public.organization_role[])) with check (public.has_organization_role(id, array['owner', 'admin']::public.organization_role[]));
+create policy organizations_select on public.organizations for select to authenticated using (private.is_organization_member(id));
+create policy organizations_update on public.organizations for update to authenticated using (private.has_organization_role(id, array['owner', 'admin']::public.organization_role[])) with check (private.has_organization_role(id, array['owner', 'admin']::public.organization_role[]));
 
-create policy members_select on public.organization_members for select to authenticated using (public.is_organization_member(organization_id));
-create policy members_insert on public.organization_members for insert to authenticated with check (public.has_organization_role(organization_id, array['owner', 'admin']::public.organization_role[]));
-create policy members_update on public.organization_members for update to authenticated using (public.has_organization_role(organization_id, array['owner', 'admin']::public.organization_role[])) with check (public.has_organization_role(organization_id, array['owner', 'admin']::public.organization_role[]));
-create policy members_delete on public.organization_members for delete to authenticated using (public.has_organization_role(organization_id, array['owner', 'admin']::public.organization_role[]));
+create policy members_select on public.organization_members for select to authenticated using (private.is_organization_member(organization_id));
+create policy members_insert on public.organization_members for insert to authenticated with check (private.has_organization_role(organization_id, array['owner', 'admin']::public.organization_role[]));
+create policy members_update on public.organization_members for update to authenticated using (private.has_organization_role(organization_id, array['owner', 'admin']::public.organization_role[])) with check (private.has_organization_role(organization_id, array['owner', 'admin']::public.organization_role[]));
+create policy members_delete on public.organization_members for delete to authenticated using (private.has_organization_role(organization_id, array['owner', 'admin']::public.organization_role[]));
 
-create policy clients_select on public.clients for select to authenticated using (public.is_organization_member(organization_id));
-create policy clients_insert on public.clients for insert to authenticated with check (created_by = (select auth.uid()) and public.has_organization_role(organization_id, array['owner', 'admin', 'seller']::public.organization_role[]));
-create policy clients_update on public.clients for update to authenticated using (public.has_organization_role(organization_id, array['owner', 'admin', 'seller']::public.organization_role[])) with check (public.has_organization_role(organization_id, array['owner', 'admin', 'seller']::public.organization_role[]));
+create policy clients_select on public.clients for select to authenticated using (private.is_organization_member(organization_id));
+create policy clients_insert on public.clients for insert to authenticated with check (created_by = (select auth.uid()) and private.has_organization_role(organization_id, array['owner', 'admin', 'seller']::public.organization_role[]));
+create policy clients_update on public.clients for update to authenticated using (private.has_organization_role(organization_id, array['owner', 'admin', 'seller']::public.organization_role[])) with check (private.has_organization_role(organization_id, array['owner', 'admin', 'seller']::public.organization_role[]));
 
-create policy products_select on public.products for select to authenticated using (public.is_organization_member(organization_id));
-create policy products_insert on public.products for insert to authenticated with check (created_by = (select auth.uid()) and public.has_organization_role(organization_id, array['owner', 'admin', 'seller']::public.organization_role[]));
-create policy products_update on public.products for update to authenticated using (public.has_organization_role(organization_id, array['owner', 'admin', 'seller']::public.organization_role[])) with check (public.has_organization_role(organization_id, array['owner', 'admin', 'seller']::public.organization_role[]));
+create policy products_select on public.products for select to authenticated using (private.is_organization_member(organization_id));
+create policy products_insert on public.products for insert to authenticated with check (created_by = (select auth.uid()) and private.has_organization_role(organization_id, array['owner', 'admin', 'seller']::public.organization_role[]));
+create policy products_update on public.products for update to authenticated using (private.has_organization_role(organization_id, array['owner', 'admin', 'seller']::public.organization_role[])) with check (private.has_organization_role(organization_id, array['owner', 'admin', 'seller']::public.organization_role[]));
 
-create policy quotes_select on public.quotes for select to authenticated using (public.is_organization_member(organization_id));
-create policy quotes_insert on public.quotes for insert to authenticated with check (created_by = (select auth.uid()) and public.has_organization_role(organization_id, array['owner', 'admin', 'seller']::public.organization_role[]));
-create policy quotes_update on public.quotes for update to authenticated using (public.has_organization_role(organization_id, array['owner', 'admin', 'seller']::public.organization_role[])) with check (public.has_organization_role(organization_id, array['owner', 'admin', 'seller']::public.organization_role[]));
+create policy quotes_select on public.quotes for select to authenticated using (private.is_organization_member(organization_id));
+create policy quotes_insert on public.quotes for insert to authenticated with check (created_by = (select auth.uid()) and private.has_organization_role(organization_id, array['owner', 'admin', 'seller']::public.organization_role[]));
+create policy quotes_update on public.quotes for update to authenticated using (private.has_organization_role(organization_id, array['owner', 'admin', 'seller']::public.organization_role[])) with check (private.has_organization_role(organization_id, array['owner', 'admin', 'seller']::public.organization_role[]));
 
-create policy quote_items_select on public.quote_items for select to authenticated using (public.is_organization_member(organization_id));
-create policy quote_items_insert on public.quote_items for insert to authenticated with check (public.has_organization_role(organization_id, array['owner', 'admin', 'seller']::public.organization_role[]));
-create policy quote_items_update on public.quote_items for update to authenticated using (public.has_organization_role(organization_id, array['owner', 'admin', 'seller']::public.organization_role[])) with check (public.has_organization_role(organization_id, array['owner', 'admin', 'seller']::public.organization_role[]));
-create policy quote_items_delete on public.quote_items for delete to authenticated using (public.has_organization_role(organization_id, array['owner', 'admin', 'seller']::public.organization_role[]));
+create policy quote_items_select on public.quote_items for select to authenticated using (private.is_organization_member(organization_id));
+create policy quote_items_insert on public.quote_items for insert to authenticated with check (private.has_organization_role(organization_id, array['owner', 'admin', 'seller']::public.organization_role[]));
+create policy quote_items_update on public.quote_items for update to authenticated using (private.has_organization_role(organization_id, array['owner', 'admin', 'seller']::public.organization_role[])) with check (private.has_organization_role(organization_id, array['owner', 'admin', 'seller']::public.organization_role[]));
+create policy quote_items_delete on public.quote_items for delete to authenticated using (private.has_organization_role(organization_id, array['owner', 'admin', 'seller']::public.organization_role[]));
 
-create policy audit_events_select on public.audit_events for select to authenticated using (public.has_organization_role(organization_id, array['owner', 'admin']::public.organization_role[]));
+create policy audit_events_select on public.audit_events for select to authenticated using (private.has_organization_role(organization_id, array['owner', 'admin']::public.organization_role[]));
 
-create policy privacy_requests_select on public.privacy_requests for select to authenticated using (requester_user_id = (select auth.uid()) or public.has_organization_role(organization_id, array['owner', 'admin']::public.organization_role[]));
-create policy privacy_requests_insert on public.privacy_requests for insert to authenticated with check (requester_user_id = (select auth.uid()) and public.is_organization_member(organization_id));
-create policy privacy_requests_update on public.privacy_requests for update to authenticated using (public.has_organization_role(organization_id, array['owner', 'admin']::public.organization_role[])) with check (public.has_organization_role(organization_id, array['owner', 'admin']::public.organization_role[]));
+create policy privacy_requests_select on public.privacy_requests for select to authenticated using (requester_user_id = (select auth.uid()) or private.has_organization_role(organization_id, array['owner', 'admin']::public.organization_role[]));
+create policy privacy_requests_insert on public.privacy_requests for insert to authenticated with check (requester_user_id = (select auth.uid()) and private.is_organization_member(organization_id));
+create policy privacy_requests_update on public.privacy_requests for update to authenticated using (private.has_organization_role(organization_id, array['owner', 'admin']::public.organization_role[])) with check (private.has_organization_role(organization_id, array['owner', 'admin']::public.organization_role[]));
 
 grant usage on schema public to authenticated;
+grant usage on schema private to authenticated;
 grant select, insert, update on public.organizations, public.organization_members, public.clients, public.products, public.quotes, public.quote_items, public.privacy_requests to authenticated;
 grant delete on public.organization_members, public.quote_items to authenticated;
 grant select on public.audit_events to authenticated;
+revoke all on public.organizations, public.organization_members, public.clients, public.products, public.quotes, public.quote_items, public.audit_events, public.privacy_requests from anon;
+revoke all on function public.create_organization(text, text) from public, anon;
 grant execute on function public.create_organization(text, text) to authenticated;
-revoke all on function public.is_organization_member(uuid) from public;
-revoke all on function public.has_organization_role(uuid, public.organization_role[]) from public;
-grant execute on function public.is_organization_member(uuid) to authenticated;
-grant execute on function public.has_organization_role(uuid, public.organization_role[]) to authenticated;
+grant execute on function private.is_organization_member(uuid) to authenticated;
+grant execute on function private.has_organization_role(uuid, public.organization_role[]) to authenticated;

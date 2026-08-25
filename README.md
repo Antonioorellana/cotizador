@@ -8,7 +8,9 @@ Webapp para crear cotizaciones en CLP con clientes, catálogo, estados, vista im
 - Editor funcional: líneas editables, lista estándar/oferta, cálculo por línea, guardado local demostrativo, confirmación de emisión y bloqueo posterior.
 - Vista individual preparada para imprimir o guardar como PDF.
 - Autenticación Supabase preparada mediante `@supabase/ssr` y clave publicable.
-- Migración inicial lista, pero **no aplicada a ningún proyecto Supabase**.
+- Proyecto Supabase dedicado `sswupbyilovwfvvrpzzg` creado en `sa-east-1`.
+- Migración inicial aplicada y registrada; RLS, permisos, totales, aislamiento entre organizaciones e inmutabilidad verificados.
+- La activación de Auth en Vercel queda pendiente de crear la primera cuenta propietaria; hasta entonces producción continúa en modo demostración.
 - Todas las rutas operativas quedan protegidas automáticamente cuando se configuran las variables de Supabase.
 
 No ingrese datos reales mientras la aplicación muestre la franja `Modo demostración`.
@@ -48,8 +50,8 @@ El build usa Webpack porque el entorno de desarrollo administrado bloquea el pue
 
 ## Supabase
 
-1. Crear un proyecto dedicado; no reutilizar bases de otros dominios.
-2. Aplicar `supabase/migrations/20260821000000_initial_schema.sql`.
+1. Usar el proyecto dedicado `sswupbyilovwfvvrpzzg`; no reutilizar bases de otros dominios.
+2. La migración aplicada corresponde a `supabase/migrations/20260825190032_initial_schema.sql`.
 3. Copiar `.env.example` a `.env.local`.
 4. Configurar:
 
