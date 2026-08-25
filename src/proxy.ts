@@ -46,6 +46,7 @@ export const config = {
     "/clientes/:path*",
     "/productos/:path*",
     "/configuracion/:path*",
+    "/establecer-clave",
     "/acceso",
   ],
 };

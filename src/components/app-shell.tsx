@@ -5,7 +5,6 @@ import {
   ChevronDown,
   FileText,
   LayoutDashboard,
-  LogOut,
   Search,
   Settings,
   Users,
@@ -13,6 +12,7 @@ import {
 import Link from "next/link";
 import type { ReactNode } from "react";
 import { DEMO_NOTICE } from "@/lib/demo-data";
+import { SignOutButton } from "@/components/sign-out-button";
 
 type NavigationKey = "summary" | "quotes" | "clients" | "products" | "settings";
 
@@ -74,14 +74,7 @@ export function AppShell({ active, breadcrumb, children, headerAction }: AppShel
         </nav>
 
         <div className="border-t border-white/10 p-3">
-          <button type="button" className="flex w-full items-center gap-3 rounded-lg p-3 text-left hover:bg-white/10">
-            <span className="grid size-9 place-items-center rounded-full bg-white/15 text-xs font-bold">UD</span>
-            <span className="min-w-0 flex-1">
-              <strong className="block truncate text-sm">Usuario Demo</strong>
-              <span className="block text-xs text-white/50">Administrador</span>
-            </span>
-            <LogOut aria-label="Salir" size={17} className="text-white/55" />
-          </button>
+          <SignOutButton />
         </div>
       </aside>
 
